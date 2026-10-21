@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
+import { swaggerUI } from '@hono/swagger-ui';
 import { rateLimiter } from './middleware/rateLimit';
 import { executeParallelProbes } from './probes/orchestrator';
 import { mockDetectTechnologies } from './rules/mockDetector';
@@ -53,6 +54,8 @@ const DomainQuerySchema = z.object({
 const enrichRoute = createRoute({
   method: 'get',
   path: '/v1/enrich/technographics',
+  summary: 'Enrich domain technographics',
+  description: 'Inspects a target domain across DNS, TLS handshakes, and streamed HTTP bodies to detect infrastructure technologies.',
   request: {
     query: DomainQuerySchema
   },
@@ -132,6 +135,19 @@ app.openapi(enrichRoute, async (c) => {
     'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
   });
 });
+
+// 6. Mount OpenAPI Specification JSON Endpoint
+app.doc('/doc', {
+  openapi: '3.1.0',
+  info: {
+    title: 'Technographic Intelligence API',
+    version: '1.0.0',
+    description: 'High-performance edge API for real-time infrastructure and SaaS technographic detection.'
+  }
+});
+
+// 7. Mount Interactive Swagger UI Dashboard
+app.get('/ui', swaggerUI({ url: '/doc' }));
 
 // Health check endpoint
 app.get('/health', (c) => {

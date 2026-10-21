@@ -1,9 +1,11 @@
 import 'reflect-metadata';
-import { runTlsProbe } from './probes/tls';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
-import { runDnsProbe } from './probes/doh';
+import { rateLimiter } from './middleware/rateLimit';
+import { executeParallelProbes } from './probes/orchestrator';
 import { mockDetectTechnologies } from './rules/mockDetector';
-import { ProblemDetails, RawProbePayload } from './types/contracts';
+import { ProblemDetails } from './types/contracts';
+
+const CACHE_TTL_SECONDS = 3600; // 1 hour edge cache
 
 // 1. Initialize OpenAPI-enabled Hono router with RFC 7807 error formatting
 const app = new OpenAPIHono({
@@ -28,7 +30,10 @@ const app = new OpenAPIHono({
   }
 });
 
-// 2. Define Query Parameter Validation Schema
+// 2. Attach Global Middleware (Rate Limiting)
+app.use('/v1/enrich/*', rateLimiter);
+
+// 3. Define Query Parameter Validation Schema
 const DomainQuerySchema = z.object({
   domain: z
     .string()
@@ -44,7 +49,7 @@ const DomainQuerySchema = z.object({
     })
 });
 
-// 3. Define Route Specification (OpenAPI Contract)
+// 4. Define Route Specification (OpenAPI Contract)
 const enrichRoute = createRoute({
   method: 'get',
   path: '/v1/enrich/technographics',
@@ -58,51 +63,77 @@ const enrichRoute = createRoute({
     400: {
       description: 'Invalid domain query parameter provided (RFC 7807)'
     },
+    429: {
+      description: 'Rate limit quota exceeded (RFC 7807)'
+    },
     500: {
       description: 'Internal server error occurred while probing domain'
     }
   }
 });
 
-// 4. Implement Route Logic
+// 5. Implement Route Logic with L1 Edge Caching
 app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
+  const cacheUrl = new URL(c.req.url);
+  cacheUrl.searchParams.set('domain', domain.toLowerCase());
+  const cacheKey = new Request(cacheUrl.toString(), c.req.raw);
+
+  const cache = caches.default;
+
+  // 1. Check for cached response
+  const cachedResponse = await cache.match(cacheKey);
+  if (cachedResponse) {
+    const cachedData = (await cachedResponse.json()) as Record<string, any>;
+    return c.json(
+      {
+        ...cachedData,
+        cached: true
+      },
+      200,
+      {
+        'X-Cache-Status': 'HIT',
+        'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
+      }
+    );
+  }
+
+  // 2. Cache MISS: Run probes
   const startTime = Date.now();
+  const probePayload = await executeParallelProbes(domain);
+  const result = await mockDetectTechnologies(probePayload);
+  result.metadata.probeDurationMs = Date.now() - startTime;
+  result.cached = false;
 
-  // Run Probe 1 (DNS) and Probe 2 (TLS) concurrently
-  const [dnsData, tlsData] = await Promise.all([
-    runDnsProbe(domain),
-    runTlsProbe(domain)
-  ]);
-
-  // Construct probe payload with live DNS and TLS data
-  const probePayload: RawProbePayload = {
-    domain,
-    timestamp: new Date().toISOString(),
-    dns: dnsData,
-    tls: tlsData,
-    html: {
-      statusCode: 200,
-      headers: { server: 'cloudflare' },
-      snippet: '<html><body>Mock HTML content</body></html>'
+  const responseBody = {
+    ...result,
+    _debugRawDns: probePayload.dns,
+    _debugRawTls: probePayload.tls,
+    _debugRawHtml: {
+      statusCode: probePayload.html.statusCode,
+      headers: probePayload.html.headers,
+      snippetLengthBytes: probePayload.html.snippet.length,
+      snippetPreview: probePayload.html.snippet.slice(0, 300)
     }
   };
 
-  // Run through mock detection engine
-  const result = await mockDetectTechnologies(probePayload);
+  // 3. Store response in Cloudflare edge cache
+  const responseToCache = new Response(JSON.stringify(responseBody), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
+    }
+  });
 
-  // Record total elapsed probe time
-  result.metadata.probeDurationMs = Date.now() - startTime;
+  c.executionCtx.waitUntil(cache.put(cacheKey, responseToCache));
 
-  // Return technographic results alongside live probe telemetry
-  return c.json({
-    ...result,
-    _debugRawDns: dnsData,
-    _debugRawTls: tlsData
-  }, 200);
+  return c.json(responseBody, 200, {
+    'X-Cache-Status': 'MISS',
+    'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
+  });
 });
 
-// Health check endpoint for uptime bots
+// Health check endpoint
 app.get('/health', (c) => {
   return c.json({
     status: 'healthy',

@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
+import { rateLimiter } from './middleware/rateLimit';
 import { executeParallelProbes } from './probes/orchestrator';
 import { mockDetectTechnologies } from './rules/mockDetector';
 import { ProblemDetails } from './types/contracts';
@@ -29,7 +30,10 @@ const app = new OpenAPIHono({
   }
 });
 
-// 2. Define Query Parameter Validation Schema
+// 2. Attach Global Middleware (Rate Limiting)
+app.use('/v1/enrich/*', rateLimiter);
+
+// 3. Define Query Parameter Validation Schema
 const DomainQuerySchema = z.object({
   domain: z
     .string()
@@ -45,7 +49,7 @@ const DomainQuerySchema = z.object({
     })
 });
 
-// 3. Define Route Specification
+// 4. Define Route Specification (OpenAPI Contract)
 const enrichRoute = createRoute({
   method: 'get',
   path: '/v1/enrich/technographics',
@@ -59,35 +63,39 @@ const enrichRoute = createRoute({
     400: {
       description: 'Invalid domain query parameter provided (RFC 7807)'
     },
+    429: {
+      description: 'Rate limit quota exceeded (RFC 7807)'
+    },
     500: {
       description: 'Internal server error occurred while probing domain'
     }
   }
 });
 
-// 4. Implement Route Logic with L1 Edge Caching
+// 5. Implement Route Logic with L1 Edge Caching
 app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
   const cacheUrl = new URL(c.req.url);
-  // Normalize cache key so casing or trailing spaces don't bypass cache
   cacheUrl.searchParams.set('domain', domain.toLowerCase());
   const cacheKey = new Request(cacheUrl.toString(), c.req.raw);
 
-  // Access Cloudflare native edge cache
-  // In local development, caches.default is emulated by Wrangler
   const cache = caches.default;
 
-  // 1. Check for cached entry
+  // 1. Check for cached response
   const cachedResponse = await cache.match(cacheKey);
   if (cachedResponse) {
-    const cachedData = await cachedResponse.json() as Record<string, any>;
-    return c.json({
-      ...cachedData,
-      cached: true
-    }, 200, {
-      'X-Cache-Status': 'HIT',
-      'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
-    });
+    const cachedData = (await cachedResponse.json()) as Record<string, any>;
+    return c.json(
+      {
+        ...cachedData,
+        cached: true
+      },
+      200,
+      {
+        'X-Cache-Status': 'HIT',
+        'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
+      }
+    );
   }
 
   // 2. Cache MISS: Run probes
@@ -117,7 +125,6 @@ app.openapi(enrichRoute, async (c) => {
     }
   });
 
-  // Use waitUntil so caching happens in the background without blocking the user
   c.executionCtx.waitUntil(cache.put(cacheKey, responseToCache));
 
   return c.json(responseBody, 200, {

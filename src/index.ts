@@ -4,6 +4,8 @@ import { executeParallelProbes } from './probes/orchestrator';
 import { mockDetectTechnologies } from './rules/mockDetector';
 import { ProblemDetails } from './types/contracts';
 
+const CACHE_TTL_SECONDS = 3600; // 1 hour edge cache
+
 // 1. Initialize OpenAPI-enabled Hono router with RFC 7807 error formatting
 const app = new OpenAPIHono({
   defaultHook: (result, c) => {
@@ -43,7 +45,7 @@ const DomainQuerySchema = z.object({
     })
 });
 
-// 3. Define Route Specification (OpenAPI Contract)
+// 3. Define Route Specification
 const enrichRoute = createRoute({
   method: 'get',
   path: '/v1/enrich/technographics',
@@ -63,21 +65,39 @@ const enrichRoute = createRoute({
   }
 });
 
-// 4. Implement Route Logic
+// 4. Implement Route Logic with L1 Edge Caching
 app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
+  const cacheUrl = new URL(c.req.url);
+  // Normalize cache key so casing or trailing spaces don't bypass cache
+  cacheUrl.searchParams.set('domain', domain.toLowerCase());
+  const cacheKey = new Request(cacheUrl.toString(), c.req.raw);
+
+  // Access Cloudflare native edge cache
+  // In local development, caches.default is emulated by Wrangler
+  const cache = caches.default;
+
+  // 1. Check for cached entry
+  const cachedResponse = await cache.match(cacheKey);
+  if (cachedResponse) {
+    const cachedData = await cachedResponse.json() as Record<string, any>;
+    return c.json({
+      ...cachedData,
+      cached: true
+    }, 200, {
+      'X-Cache-Status': 'HIT',
+      'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
+    });
+  }
+
+  // 2. Cache MISS: Run probes
   const startTime = Date.now();
-
-  // Execute isolated parallel probes with hard timeout boundaries
   const probePayload = await executeParallelProbes(domain);
-
-  // Run through detection engine
   const result = await mockDetectTechnologies(probePayload);
-
-  // Record total elapsed probe time
   result.metadata.probeDurationMs = Date.now() - startTime;
+  result.cached = false;
 
-  return c.json({
+  const responseBody = {
     ...result,
     _debugRawDns: probePayload.dns,
     _debugRawTls: probePayload.tls,
@@ -87,10 +107,26 @@ app.openapi(enrichRoute, async (c) => {
       snippetLengthBytes: probePayload.html.snippet.length,
       snippetPreview: probePayload.html.snippet.slice(0, 300)
     }
-  }, 200);
+  };
+
+  // 3. Store response in Cloudflare edge cache
+  const responseToCache = new Response(JSON.stringify(responseBody), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
+    }
+  });
+
+  // Use waitUntil so caching happens in the background without blocking the user
+  c.executionCtx.waitUntil(cache.put(cacheKey, responseToCache));
+
+  return c.json(responseBody, 200, {
+    'X-Cache-Status': 'MISS',
+    'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}`
+  });
 });
 
-// Health check endpoint for uptime bots
+// Health check endpoint
 app.get('/health', (c) => {
   return c.json({
     status: 'healthy',

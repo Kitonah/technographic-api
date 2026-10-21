@@ -1,9 +1,9 @@
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
+import { runDnsProbe } from './probes/doh';
 import { mockDetectTechnologies } from './rules/mockDetector';
 import { ProblemDetails, RawProbePayload } from './types/contracts';
 
-// 1. Initialize OpenAPI-enabled Hono router
-// defaultHook intercepts any input validation errors and formats them into standard RFC 7807 JSON
+// 1. Initialize OpenAPI-enabled Hono router with RFC 7807 error formatting
 const app = new OpenAPIHono({
   defaultHook: (result, c) => {
     if (!result.success) {
@@ -26,8 +26,7 @@ const app = new OpenAPIHono({
   }
 });
 
-// 2. Define the Query Parameter Validation Schema
-// Validates that 'domain' is present, properly structured, and clean
+// 2. Define Query Parameter Validation Schema
 const DomainQuerySchema = z.object({
   domain: z
     .string()
@@ -43,7 +42,7 @@ const DomainQuerySchema = z.object({
     })
 });
 
-// 3. Define the Route Specification (OpenAPI Contract)
+// 3. Define Route Specification (OpenAPI Contract)
 const enrichRoute = createRoute({
   method: 'get',
   path: '/v1/enrich/technographics',
@@ -63,21 +62,19 @@ const enrichRoute = createRoute({
   }
 });
 
-// 4. Implement the Route Logic
+// 4. Implement Route Logic
 app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
+  const startTime = Date.now();
 
-  // Construct a temporary probe payload using the domain
-  // (In Tasks 3 & 4, your real Probes 1, 2, and 3 will fill this in)
-  const syntheticPayload: RawProbePayload = {
+  // Run real Probe 1: DNS-over-HTTPS
+  const dnsData = await runDnsProbe(domain);
+
+  // Construct probe payload with real DNS data (TLS and HTML remain synthetic until Tasks 4 & 5)
+  const probePayload: RawProbePayload = {
     domain,
     timestamp: new Date().toISOString(),
-    dns: {
-      mxRecords: ['aspmx.l.google.com'],
-      txtRecords: ['v=spf1 include:_spf.google.com ~all'],
-      cnames: [],
-      resolvedIps: ['104.18.2.1']
-    },
+    dns: dnsData,
     tls: {
       issuer: 'Cloudflare Inc ECC CA-3',
       sanList: [domain, `*.${domain}`],
@@ -92,12 +89,19 @@ app.openapi(enrichRoute, async (c) => {
   };
 
   // Run through mock detection engine
-  const result = await mockDetectTechnologies(syntheticPayload);
+  const result = await mockDetectTechnologies(probePayload);
 
-  return c.json(result, 200);
+  // Record total probe duration
+  result.metadata.probeDurationMs = Date.now() - startTime;
+
+  // Return enriched result plus raw DNS for debugging verification
+  return c.json({
+    ...result,
+    _debugRawDns: dnsData
+  }, 200);
 });
 
-// Health check endpoint for monitoring/uptime bots
+// Health check endpoint for uptime bots
 app.get('/health', (c) => {
   return c.json({
     status: 'healthy',

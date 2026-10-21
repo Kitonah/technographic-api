@@ -1,10 +1,8 @@
-import { runHtmlProbe } from './probes/stream';
 import 'reflect-metadata';
-import { runTlsProbe } from './probes/tls';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
-import { runDnsProbe } from './probes/doh';
+import { executeParallelProbes } from './probes/orchestrator';
 import { mockDetectTechnologies } from './rules/mockDetector';
-import { ProblemDetails, RawProbePayload } from './types/contracts';
+import { ProblemDetails } from './types/contracts';
 
 // 1. Initialize OpenAPI-enabled Hono router with RFC 7807 error formatting
 const app = new OpenAPIHono({
@@ -70,41 +68,27 @@ app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
   const startTime = Date.now();
 
-  // Run Probe 1 (DNS), Probe 2 (TLS), and Probe 3 (Streaming HTML) in parallel
-  const [dnsData, tlsData, htmlData] = await Promise.all([
-    runDnsProbe(domain),
-    runTlsProbe(domain),
-    runHtmlProbe(domain)
-  ]);
+  // Execute isolated parallel probes with hard timeout boundaries
+  const probePayload = await executeParallelProbes(domain);
 
-  // Construct complete live probe payload
-  const probePayload: RawProbePayload = {
-    domain,
-    timestamp: new Date().toISOString(),
-    dns: dnsData,
-    tls: tlsData,
-    html: htmlData
-  };
-
-  // Run through mock detection engine
+  // Run through detection engine
   const result = await mockDetectTechnologies(probePayload);
 
-  // Total execution duration across all three parallel network probes
+  // Record total elapsed probe time
   result.metadata.probeDurationMs = Date.now() - startTime;
 
-  // Return technographic output with debug inspection data
   return c.json({
     ...result,
-    _debugRawDns: dnsData,
-    _debugRawTls: tlsData,
+    _debugRawDns: probePayload.dns,
+    _debugRawTls: probePayload.tls,
     _debugRawHtml: {
-      statusCode: htmlData.statusCode,
-      headers: htmlData.headers,
-      snippetLengthBytes: htmlData.snippet.length,
-      snippetPreview: htmlData.snippet.slice(0, 300)
+      statusCode: probePayload.html.statusCode,
+      headers: probePayload.html.headers,
+      snippetLengthBytes: probePayload.html.snippet.length,
+      snippetPreview: probePayload.html.snippet.slice(0, 300)
     }
   }, 200);
-}); 
+});
 
 // Health check endpoint for uptime bots
 app.get('/health', (c) => {

@@ -1,3 +1,5 @@
+import 'reflect-metadata';
+import { runTlsProbe } from './probes/tls';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import { runDnsProbe } from './probes/doh';
 import { mockDetectTechnologies } from './rules/mockDetector';
@@ -67,20 +69,18 @@ app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
   const startTime = Date.now();
 
-  // Run real Probe 1: DNS-over-HTTPS
-  const dnsData = await runDnsProbe(domain);
+  // Run Probe 1 (DNS) and Probe 2 (TLS) concurrently
+  const [dnsData, tlsData] = await Promise.all([
+    runDnsProbe(domain),
+    runTlsProbe(domain)
+  ]);
 
-  // Construct probe payload with real DNS data (TLS and HTML remain synthetic until Tasks 4 & 5)
+  // Construct probe payload with live DNS and TLS data
   const probePayload: RawProbePayload = {
     domain,
     timestamp: new Date().toISOString(),
     dns: dnsData,
-    tls: {
-      issuer: 'Cloudflare Inc ECC CA-3',
-      sanList: [domain, `*.${domain}`],
-      validTo: '2027-01-01T00:00:00.000Z',
-      protocol: 'TLSv1.3'
-    },
+    tls: tlsData,
     html: {
       statusCode: 200,
       headers: { server: 'cloudflare' },
@@ -91,13 +91,14 @@ app.openapi(enrichRoute, async (c) => {
   // Run through mock detection engine
   const result = await mockDetectTechnologies(probePayload);
 
-  // Record total probe duration
+  // Record total elapsed probe time
   result.metadata.probeDurationMs = Date.now() - startTime;
 
-  // Return enriched result plus raw DNS for debugging verification
+  // Return technographic results alongside live probe telemetry
   return c.json({
     ...result,
-    _debugRawDns: dnsData
+    _debugRawDns: dnsData,
+    _debugRawTls: tlsData
   }, 200);
 });
 

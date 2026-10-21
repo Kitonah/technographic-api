@@ -1,3 +1,4 @@
+import { runHtmlProbe } from './probes/stream';
 import 'reflect-metadata';
 import { runTlsProbe } from './probes/tls';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
@@ -69,38 +70,41 @@ app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
   const startTime = Date.now();
 
-  // Run Probe 1 (DNS) and Probe 2 (TLS) concurrently
-  const [dnsData, tlsData] = await Promise.all([
+  // Run Probe 1 (DNS), Probe 2 (TLS), and Probe 3 (Streaming HTML) in parallel
+  const [dnsData, tlsData, htmlData] = await Promise.all([
     runDnsProbe(domain),
-    runTlsProbe(domain)
+    runTlsProbe(domain),
+    runHtmlProbe(domain)
   ]);
 
-  // Construct probe payload with live DNS and TLS data
+  // Construct complete live probe payload
   const probePayload: RawProbePayload = {
     domain,
     timestamp: new Date().toISOString(),
     dns: dnsData,
     tls: tlsData,
-    html: {
-      statusCode: 200,
-      headers: { server: 'cloudflare' },
-      snippet: '<html><body>Mock HTML content</body></html>'
-    }
+    html: htmlData
   };
 
   // Run through mock detection engine
   const result = await mockDetectTechnologies(probePayload);
 
-  // Record total elapsed probe time
+  // Total execution duration across all three parallel network probes
   result.metadata.probeDurationMs = Date.now() - startTime;
 
-  // Return technographic results alongside live probe telemetry
+  // Return technographic output with debug inspection data
   return c.json({
     ...result,
     _debugRawDns: dnsData,
-    _debugRawTls: tlsData
+    _debugRawTls: tlsData,
+    _debugRawHtml: {
+      statusCode: htmlData.statusCode,
+      headers: htmlData.headers,
+      snippetLengthBytes: htmlData.snippet.length,
+      snippetPreview: htmlData.snippet.slice(0, 300)
+    }
   }, 200);
-});
+}); 
 
 // Health check endpoint for uptime bots
 app.get('/health', (c) => {

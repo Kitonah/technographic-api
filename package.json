@@ -18,8 +18,10 @@
     "wrangler": "^4.149.0"
   },
   "dependencies": {
+    "@hono/zod-openapi": "^1.6.3",
     "@upstash/ratelimit": "^2.2.0",
     "@upstash/redis": "^1.39.0",
-    "hono": "^4.13.13"
+    "hono": "^4.13.13",
+    "zod": "^4.6.7"
   }
 }

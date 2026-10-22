@@ -105,8 +105,8 @@ app.openapi(enrichRoute, async (c) => {
   const startTime = Date.now();
   const probePayload = await executeParallelProbes(domain);
 
-  // Run through real signature engine
-  const result = await detectTechnologies(probePayload);
+  // Run through real signature engine with fallback domain
+  const result = await detectTechnologies(probePayload, domain);
   result.metadata.probeDurationMs = Date.now() - startTime;
   result.cached = false;
 
@@ -115,10 +115,10 @@ app.openapi(enrichRoute, async (c) => {
     _debugRawDns: probePayload.dns,
     _debugRawTls: probePayload.tls,
     _debugRawHtml: {
-      statusCode: probePayload.html.statusCode,
-      headers: probePayload.html.headers,
-      snippetLengthBytes: probePayload.html.snippet.length,
-      snippetPreview: probePayload.html.snippet.slice(0, 300)
+      statusCode: probePayload.html?.statusCode || 0,
+      headers: probePayload.html?.headers || {},
+      snippetLengthBytes: probePayload.html?.snippet?.length || 0,
+      snippetPreview: (probePayload.html?.snippet || '').slice(0, 300)
     }
   };
 

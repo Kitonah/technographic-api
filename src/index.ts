@@ -3,7 +3,7 @@ import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import { swaggerUI } from '@hono/swagger-ui';
 import { rateLimiter } from './middleware/rateLimit';
 import { executeParallelProbes } from './probes/orchestrator';
-import { mockDetectTechnologies } from './rules/mockDetector';
+import { detectTechnologies } from './rules/detector';
 import { ProblemDetails } from './types/contracts';
 
 const CACHE_TTL_SECONDS = 3600; // 1 hour edge cache
@@ -75,7 +75,7 @@ const enrichRoute = createRoute({
   }
 });
 
-// 5. Implement Route Logic with L1 Edge Caching
+// 5. Implement Route Logic with Real Detection & L1 Edge Caching
 app.openapi(enrichRoute, async (c) => {
   const { domain } = c.req.valid('query');
   const cacheUrl = new URL(c.req.url);
@@ -104,7 +104,9 @@ app.openapi(enrichRoute, async (c) => {
   // 2. Cache MISS: Run probes
   const startTime = Date.now();
   const probePayload = await executeParallelProbes(domain);
-  const result = await mockDetectTechnologies(probePayload);
+
+  // Run through real signature engine with fallback domain
+  const result = await detectTechnologies(probePayload, domain);
   result.metadata.probeDurationMs = Date.now() - startTime;
   result.cached = false;
 
@@ -113,10 +115,10 @@ app.openapi(enrichRoute, async (c) => {
     _debugRawDns: probePayload.dns,
     _debugRawTls: probePayload.tls,
     _debugRawHtml: {
-      statusCode: probePayload.html.statusCode,
-      headers: probePayload.html.headers,
-      snippetLengthBytes: probePayload.html.snippet.length,
-      snippetPreview: probePayload.html.snippet.slice(0, 300)
+      statusCode: probePayload.html?.statusCode || 0,
+      headers: probePayload.html?.headers || {},
+      snippetLengthBytes: probePayload.html?.snippet?.length || 0,
+      snippetPreview: (probePayload.html?.snippet || '').slice(0, 300)
     }
   };
 

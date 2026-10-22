@@ -1,104 +1,103 @@
 import { HtmlProbeData } from '../types/contracts';
 
-const MAX_BYTES = 50 * 1024; // 50 KB hard inspection budget
-const USER_AGENT = 'Mozilla/5.0 (compatible; TechnographicBot/1.0; +https://technographics.io/bot)';
+const CEILING_BYTES = 51200; // 50 KB edge extraction ceiling
+const PROBE_TIMEOUT_MS = 6000; // 6-second defensive timeout
 
 /**
- * Probe 3: Streaming HTTP Reader & Header Extractor
- * Reads response headers and up to 50 KB of the HTML document before terminating the stream.
+ * Executes a controlled 50KB streaming HTTP probe against the target domain.
+ * Negotiates diagnostic headers with Akamai and Fastly, while presenting
+ * modern desktop client fingerprints to prevent anti-bot challenges.
  */
 export async function runHtmlProbe(domain: string): Promise<HtmlProbeData> {
-  const fallback: HtmlProbeData = {
-    statusCode: 0,
-    headers: {},
-    snippet: ''
-  };
-
   const targetUrl = `https://${domain}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
 
   try {
     const response = await fetch(targetUrl, {
       method: 'GET',
       headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
+        // 1. Realistic Browser Persona
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        'Accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+
+        // 2. Client Hints (Anti-Bot Camouflage)
+        'sec-ch-ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'none',
+        'sec-fetch-user': '?1',
+        'upgrade-insecure-requests': '1',
+
+        // 3. Enterprise CDN Negotiation Handshakes
+        // Akamai Diagnostic Header Request
+        'Pragma':
+          'akamai-x-cache-on, akamai-x-cache-remote-on, akamai-x-check-cacheable, akamai-x-get-cache-key, akamai-x-get-true-cache-key',
+        // Fastly Debug Request
+        'Fastly-Debug': '1'
       },
       redirect: 'follow',
-      signal: AbortSignal.timeout(3500) // 3.5-second total timeout
+      signal: controller.signal
     });
 
-    // 1. Extract and sanitize HTTP response headers
+    // Extract headers safely into lowercase dictionary
     const headers: Record<string, string> = {};
     response.headers.forEach((value, key) => {
       headers[key.toLowerCase()] = value;
     });
 
-    const statusCode = response.status;
-
-    // If there is no response body, return headers immediately
-    if (!response.body) {
-      return { statusCode, headers, snippet: '' };
-    }
-
-    // 2. Stream chunk-by-chunk and abort at 50 KB
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let accumulatedBytes = 0;
+    // Stream up to 50KB of response body without buffering the entire document
     let snippet = '';
+    let bytesRead = 0;
 
-    try {
-      while (accumulatedBytes < MAX_BYTES) {
-        const { value, done } = await reader.read();
-        if (done || !value) break;
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8', { fatal: false });
 
-        const remainingQuota = MAX_BYTES - accumulatedBytes;
-        if (value.length <= remainingQuota) {
-          accumulatedBytes += value.length;
-          snippet += decoder.decode(value, { stream: true });
-        } else {
-          // Slice only what we need to hit exactly 50 KB, then cancel
-          const partialChunk = value.subarray(0, remainingQuota);
-          accumulatedBytes += partialChunk.length;
-          snippet += decoder.decode(partialChunk, { stream: false });
-          break;
+      try {
+        while (bytesRead < CEILING_BYTES) {
+          const { done, value } = await reader.read();
+          if (done || !value) break;
+
+          const remaining = CEILING_BYTES - bytesRead;
+          const chunk = value.byteLength > remaining ? value.slice(0, remaining) : value;
+
+          snippet += decoder.decode(chunk, { stream: true });
+          bytesRead += chunk.byteLength;
+
+          if (bytesRead >= CEILING_BYTES) {
+            // Cancel the stream to release the TCP socket immediately
+            await reader.cancel();
+            break;
+          }
         }
+      } catch {
+        // If stream reader was forcibly aborted after ceiling, cleanly proceed
       }
-    } finally {
-      // Abort the underlying TCP connection to release edge network egress
-      await reader.cancel();
     }
 
     return {
-      statusCode,
+      statusCode: response.status,
       headers,
       snippet
     };
   } catch {
-    // If HTTPS fails entirely (e.g., self-signed or invalid cert), attempt plaintext HTTP fallback
-    if (targetUrl.startsWith('https://')) {
-      try {
-        const httpFallbackResponse = await fetch(`http://${domain}`, {
-          method: 'GET',
-          headers: { 'User-Agent': USER_AGENT },
-          redirect: 'follow',
-          signal: AbortSignal.timeout(2000)
-        });
-
-        const headers: Record<string, string> = {};
-        httpFallbackResponse.headers.forEach((value, key) => {
-          headers[key.toLowerCase()] = value;
-        });
-
-        return {
-          statusCode: httpFallbackResponse.status,
-          headers,
-          snippet: ''
-        };
-      } catch {
-        return fallback;
-      }
-    }
-    return fallback;
+    // Graceful fallback if domain is unreachable or times out
+    return {
+      statusCode: 0,
+      headers: {},
+      snippet: ''
+    };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
+
+// Export alias to prevent naming mismatches
+export const probeStream = runHtmlProbe;

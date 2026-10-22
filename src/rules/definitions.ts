@@ -146,6 +146,12 @@ export const PRODUCTION_SIGNATURES: TechnologySignature[] = [
         baseConfidence: 0.95
       },
       {
+        surface: 'dns',
+        subTarget: 'a',
+        regex: '^151\\.101\\.(?:[0-9]{1,3})\\.(?:[0-9]{1,3})$',
+        baseConfidence: 0.95
+      },
+      {
         surface: 'http_header',
         subTarget: 'x-served-by',
         regex: 'cache-[a-z0-9-]+-[A-Z]{3}',
@@ -156,6 +162,12 @@ export const PRODUCTION_SIGNATURES: TechnologySignature[] = [
         subTarget: 'x-timer',
         regex: '^S[0-9]{10}\\.[0-9]{6},VS0,VE[0-9]+$',
         baseConfidence: 0.90
+      },
+      {
+        surface: 'http_header',
+        subTarget: 'x-fastly-request-id',
+        regex: '^[a-f0-9]+$',
+        baseConfidence: 0.95
       },
       {
         surface: 'http_header',
@@ -186,6 +198,42 @@ export const PRODUCTION_SIGNATURES: TechnologySignature[] = [
         baseConfidence: 0.90
       },
       {
+        surface: 'http_header',
+        subTarget: 'x-akamai-request-id',
+        regex: '^[a-f0-9]+$',
+        baseConfidence: 0.95
+      },
+      {
+        surface: 'http_header',
+        subTarget: 'x-check-cacheable',
+        regex: '^(?:YES|NO)$',
+        baseConfidence: 0.95
+      },
+      {
+        surface: 'http_header',
+        subTarget: 'x-true-cache-key',
+        regex: '.*',
+        baseConfidence: 0.95
+      },
+      {
+        surface: 'http_header',
+        subTarget: 'x-cache-key',
+        regex: '.*',
+        baseConfidence: 0.95
+      },
+      {
+        surface: 'http_header',
+        subTarget: 'x-cache',
+        regex: 'akamaitechnologies\\.com|TCP_(?:HIT|MISS|MEM_HIT)',
+        baseConfidence: 0.90
+      },
+      {
+        surface: 'http_header',
+        subTarget: 'content-security-policy',
+        regex: '(?:akamaized\\.net|edgekey\\.net)',
+        baseConfidence: 0.75
+      },
+      {
         surface: 'cookie',
         regex: '^(?:ak_bmsc|bm_sv|bm_sz)=',
         baseConfidence: 0.90
@@ -211,8 +259,8 @@ export const PRODUCTION_SIGNATURES: TechnologySignature[] = [
       },
       {
         surface: 'html_script',
-        regex: '/_next/static/chunks/',
-        baseConfidence: 0.80
+        regex: 'data-next-head|__NEXT_DATA__|/_next/static/',
+        baseConfidence: 0.85
       },
       {
         surface: 'html_script',
@@ -435,7 +483,7 @@ export const PRODUCTION_SIGNATURES: TechnologySignature[] = [
       {
         surface: 'dns',
         subTarget: 'txt',
-        regex: 'pardot_[0-9]+_[a-f0-9]{32,64}',
+        regex: 'pardot_?[0-9]+[=_][a-f0-9]{32,64}',
         baseConfidence: 0.95
       },
       {

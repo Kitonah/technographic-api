@@ -1,4 +1,4 @@
-import { EnrichedResult, RawProbePayload } from '../types/contracts';
+import { EnrichedResult, EnrichedTechnology, RawProbePayload } from '../types/contracts';
 import { PRODUCTION_SIGNATURES } from './definitions';
 import { evaluateRules } from './engine';
 import { ProbeSnapshotFixture } from './types';
@@ -20,7 +20,7 @@ export async function detectTechnologies(
   const issuerOrg = issuerRaw.match(/O=([^,]+)/)?.[1] || issuerRaw;
   const issuerCn = issuerRaw.match(/CN=([^,]+)/)?.[1] || issuerRaw;
 
-  // Safely convert MX strings into structured MX records
+  // Safely convert MX strings into structured records
   const mx = (payload?.dns?.mxRecords || []).map((rec) => {
     const parts = (rec || '').trim().split(/\s+/);
     return {
@@ -62,10 +62,16 @@ export async function detectTechnologies(
 
   const detected = evaluateRules(adaptedFixture, PRODUCTION_SIGNATURES);
 
-  // Map to API response contract, prioritizing direct deployments
-  const technologies = detected
-    .filter((d) => d.deploymentRole !== 'suppressed_collision')
-    .map((d) => ({
+  const directTechnologies: EnrichedTechnology[] = [];
+  const underlyingInfrastructure: EnrichedTechnology[] = [];
+
+  for (const d of detected) {
+    // Suppressed collisions (e.g. standard Shopify when Shopify Plus is verified) are completely pruned
+    if (d.deploymentRole === 'suppressed_collision') {
+      continue;
+    }
+
+    const item: EnrichedTechnology = {
       name: d.name,
       category: d.category,
       confidence: Math.round(d.confidence * 100),
@@ -73,15 +79,25 @@ export async function detectTechnologies(
       detectedVia: d.matchedSurfaces,
       cpe23: d.cpe23,
       deploymentRole: d.deploymentRole
-    }));
+    };
+
+    if (d.deploymentRole === 'direct_deployment') {
+      directTechnologies.push(item);
+    } else if (d.deploymentRole === 'platform_bundled_substrate') {
+      underlyingInfrastructure.push(item);
+    }
+  }
 
   return {
     domain,
     scannedAt: timestamp,
     cached: false,
-    technologies: technologies as any,
+    technologies: directTechnologies,
+    underlyingInfrastructure,
     metadata: {
-      totalDetected: technologies.length,
+      totalDirect: directTechnologies.length,
+      totalSubstrate: underlyingInfrastructure.length,
+      totalDetected: directTechnologies.length + underlyingInfrastructure.length,
       probeDurationMs: 0
     }
   };
